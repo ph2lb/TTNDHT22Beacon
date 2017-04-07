@@ -7,6 +7,7 @@ Hardware used :
   - DHT22
 
 Software used : 
-  - Modified TheThingsNetwork library (for deepsleep support) check my github
+  - Modified TheThingsNetwork library (for deepsleep support) check my github ( https://github.com/ph2lb/TheThingsNetworkArduinoLibrary )
   - DHT library
-  - LowPower library 
+  - LowPower library ( https://github.com/rocketscream/Low-Power )
+ 
