@@ -8,13 +8,14 @@
  * Lex Bolkesteijn 
  * ------------------------------------------------------------------------ 
  * Filename : TTNDHT22Beacon.ino  
- * Version  : 1.0 (BETA)
+ * Version  : 1.1 (BETA)
  * ------------------------------------------------------------------------
  * Description : A low power DHT22 based datalogger for the ThingsNetwork.
  *  with deepsleep support and variable interval
  * ------------------------------------------------------------------------
  * Revision : 
  *  - 2016-nov-11 1.0 first "beta"
+ *  - 2017-jul-31 1.1 new VCC monitor routine
  * ------------------------------------------------------------------------
  * Hardware used : 
  *  - Arduino Pro-Mini 3.3V
@@ -25,6 +26,7 @@
  *  - Modified TheThingsNetwork library (for deepsleep support) check
  *    my github
  *  - DHT library
+ *  - special adcvcc library from Charles (see : https://www.thethingsnetwork.org/forum/t/full-arduino-mini-lorawan-and-1-3ua-sleep-mode/8059/32?u=lex_ph2lb )
  *  - LowPower library
  * ------------------------------------------------------------------------ 
  * TODO LIST : 
@@ -32,32 +34,55 @@
  * ------------------------------------------------------------------------ 
  * TheThingsNetwork Payload functions : 
  * 
- * DECODER : 
+function Decoder(bytes, port) 
+{
+  var retValue =   { 
+    bytes: bytes
+  };
+  
+  retValue.batt = bytes[0] / 10.0;
+  if (retValue.batt === 0)
+     delete retValue.batt; 
+ 
+  if (bytes.length >= 2)
+  {
+    retValue.humidity = bytes[1];
+    if (retValue.humidity === 0)
+      delete retValue.humidity; 
+  } 
+  if (bytes.length >= 3)
+  {
+    retValue.temperature = (((bytes[2] << 8) | bytes[3]) / 10.0) - 40.0;
+  } 
+  // preasure is not used on DHT22 but payload 
+  if (bytes.length >= 5)
+  { 
+    retValue.pressure = ((bytes[4] << 8) | bytes[5]); 
+    if (retValue.pressure === 0)
+      delete retValue.pressure; 
+  }
+   
+  return retValue;
+   
+  // Decoder  
+  return {
+    batt: batt, 
+    humidity: humidity,
+    temperature: temperature,
+    pressure: pressure,
+    bytes: bytes
+  };
+}
  * 
- * function (bytes) {
- * var batt = bytes[0] / 10.0;
+ *  http://www.home-automation-community.com/arduino-low-power-how-to-run-atmega328p-for-a-year-on-coin-cell-battery/
  *
- * if (bytes.length >= 2)
- * {
- *   var humidity = bytes[1];
- * } 
- * if (bytes.length >= 3)
- * {
- *   var temperature = (((bytes[2] << 8) | bytes[3]) / 10.0) - 40.0;
- * } 
- * if (bytes.length >= 5)
- * { 
- *   var pkcount = bytes[4];
- *   var txresult = (bytes[5] & 0x0f);
- *   var txretrycount = (bytes[5] & 0xf0) >> 4;
- * }
- *
- */ 
+*/
 
 #include "TheThingsNetwork.h"
 #include <SoftwareSerial.h>
 #include <DHT.h>
-#include <LowPower.h>
+#include <LowPower.h> 
+#include  "adcvcc.h"  
 
 // Set your AppEUI and AppKey
 
@@ -106,6 +131,21 @@ void led_off()
 {
   digitalWrite(LED, LOW);
 } 
+
+/* ======================================================================
+Function: ADC_vect
+Purpose : IRQ Handler for ADC 
+Input   : - 
+Output  : - 
+Comments: used for measuring 8 samples low power mode, ADC is then in 
+          free running mode for 8 samples
+====================================================================== */
+ISR(ADC_vect)  
+{
+  // Increment ADC counter
+  _adc_irq_cnt++;
+}
+
 
 // the arduino setup
 void setup()
@@ -159,14 +199,22 @@ void SendPing()
     delay(250);
   }
   // indicate that we are busy
-  led_on(); 
-  
-  int batt = analogRead(BATTADC); // max 1023 = 6.6V/2 because ref = 3.3V resize to 0...66
-  debugPrint(F("batt = "));
-  debugPrintLn(batt);
-  unsigned int batvaluetmp = batt * 66;
-  batvaluetmp = batvaluetmp / 1023;
-  byte batvalue = (byte)batvaluetmp; // no problem putting it into a int.
+  led_on();
+//  ttn.wakeUp();
+//  ttn.fromDeepSleep();
+// 
+
+        
+//  int batt = analogRead(BATTADC); // max 1023 = 6.6V/2 because ref = 3.3V resize to 0...66
+//  debugPrint(F("batt = "));
+//  debugPrintLn(batt);
+//  unsigned int batvaluetmp = batt * 66;
+//  batvaluetmp = batvaluetmp / 1023;
+//  byte batvalue = (byte)batvaluetmp; // no problem putting it into a int.
+
+  int batt = (int)(readVcc() / 100);  // readVCC returns  mVolt need just 100mVolt steps
+  byte batvalue = (byte)batt; // no problem putting it into a int. 
+
   debugPrint(F("batvalue = "));
   debugPrintLn(batvalue);  
  
@@ -188,42 +236,14 @@ void SendPing()
   debugPrintLn(h);
   debugPrint(F("T = "));
   debugPrintLn(t);
-  byte data[6];
+  byte data[4];
   data[0] = batvalue;  
   data[1] = h & 0xFF;
   data[2] = t >> 8;
   data[3] = t & 0xFF; 
-  data[4] = counter;
-  data[5] = prevresult;
-
-  // we try it 3 times
-  for(int i=0; i<3; i++)
-  {
-    prevresult = (byte)(i<<4);  // store retry counter in high part of byte
-    int result = ttn.sendBytes(data, sizeof(data));
-    debugPrint(F("R = "));
-    debugPrintLn(result);
-    debugPrint(F("I = "));
-    debugPrintLn(i);
-    if (result < 0)
-    {
-       switch(result)
-       {
-          case -1 : prevresult = prevresult + 8; // send failed
-            break;       
-          case -2 : prevresult = prevresult + 9; // timeout
-            break;       
-          default : prevresult = prevresult + 10; // unkown error
-            break;
-       }
-    }
-    else 
-    {
-        prevresult = prevresult + (byte)result; // tx ok and / or rx
-        break; // the for loop
-    }
-  }
-  counter++;
+  
+  ttn.sendBytes(data, sizeof(data));
+   
   led_off();
 }
 
@@ -237,24 +257,21 @@ void onMessage(const byte* payload, int length, int port)
     fastMode = false;
     if (payload[0] == 0x01)
     {
-        // start burst mode (every 60 seconds)
+        // start burst mode (every 10 seconds)
         debugSerial.println(F("Fastmode"));
-        burstMode = false;
         fastMode = true;
     }
     else if (payload[0] == 0x02)
     {
-       // start burst mode (every 15 seconds)
+       // start burst mode (every 10 seconds)
         debugSerial.println(F("Burstmode"));
         burstMode = true;
-        fastMode = false;
     }
     else
     {
-        // start normal mode (every 15 minutes) 
+        // start normal mode (every 30 seconds / minutes) 
         debugSerial.println(F("Normalmode")); 
         burstMode = false;
-        fastMode = false;
     }
   } 
 }
@@ -267,13 +284,8 @@ void loop()
   SendPing(); 
 
   // calculate interval based on if burstmode or not.
-  if (burstMode)
-    interval = BURSTINTERVAL;
-  else if (fastMode)
-    interval = FASTINTERVAL;
-  else 
-    interval = NORMALINTERVAL;
-
+  interval = burstMode ? BURSTINTERVAL : NORMALINTERVAL;   
+  interval = fastMode ? FASTINTERVAL : interval;         
   if (useLowPower)
   {  
     long sleepTime = ((long)interval + 10) * 1000;
@@ -303,4 +315,3 @@ void loop()
     ttn.wakeUp();
   }
 }
-
